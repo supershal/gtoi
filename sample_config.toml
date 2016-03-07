@@ -1,0 +1,20 @@
+[[pointconverters.whisper]]
+	pointRegex = "servers.(?P<host>[^/.]*).+_(?P<measurement>[^/.]*).+(?P<field>[^/.]*)"
+	measurement = "?measurement"
+	[[pointconverters.whisper.tag]]
+		key = "host"
+		value = "?host"
+	[pointconverters.whisper.field]  ## Only one field needed to convert graphite's "Value"
+		key = "?field"
+		#whisper's "value" field will be used for Value.
+
+## More Pointconvertsrs.whisper here.
+
+[influxclient]
+      enabled = true
+      addresses = ["localhost:8086","localhost:1234","localhost:5678"]
+      database = "traffic"
+      precision = "s"
+      batch_size = 10000
+      batch_interval = "0s"
+      concurrency = 10
