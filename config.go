@@ -8,8 +8,9 @@ import (
 )
 
 type Config struct {
-	PointConverters PointConverters `toml:"pointconverters"`
-	InfluxClient    InfluxClient    `toml:"influxclient"`
+	Migration          *Migration          `toml:"migration"`
+	PointConverters    PointConverters     `toml:"pointconverters"`
+	InfluxClientConfig *InfluxClientConfig `toml:"influxclient"`
 }
 
 type PointConverters struct {
@@ -51,6 +52,14 @@ func (t Tags) toInfluxTagsLine() []byte {
 	return b
 }
 
+func (t Tags) toMap() map[string]string {
+	tagMap := make(map[string]string, len(t))
+	for _, tag := range t {
+		tagMap[tag.Key] = tag.Value
+	}
+	return tagMap
+}
+
 type Field struct {
 	Key   string `toml:"key"`
 	Value float64
@@ -65,6 +74,12 @@ func (f Field) toInfluxFieldLine() []byte {
 	b = b[0 : len(b)-1]
 
 	return b
+}
+
+func (f Field) toMap() map[string]interface{} {
+	fieldMap := make(map[string]interface{})
+	fieldMap[f.Key] = f.Value
+	return fieldMap
 }
 
 func DecodeConfig(file string) (*Config, error) {

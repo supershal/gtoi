@@ -1,7 +1,7 @@
 package gtoi
 
 import (
-	"net/http"
+	"fmt"
 	"regexp"
 	"time"
 )
@@ -45,16 +45,11 @@ func (r *Iregexp) FindStringSubMatchMap(s string) map[string]string {
 	return captures
 }
 
-type response struct {
-	Resp     *http.Response
-	Duration time.Duration
-}
-
-// Success returns true if the request
-// was successful and false otherwise.
-func (r response) Success() bool {
-	// ADD success for tcp, udp, etc
-	return !(r.Resp == nil || r.Resp.StatusCode != 204)
+type Response struct {
+	Database   string
+	RP         string
+	Pointcount int
+	Duration   time.Duration
 }
 
 //////////////////////////////////
@@ -108,4 +103,15 @@ func (c *ConcurrencyLimiter) handleLimits() {
 		c.count++
 		r <- struct{}{}
 	}
+}
+
+func toInfluxDbDuration(d time.Duration) string {
+	secs := d.Seconds()
+	if secs >= 604800 { // if more than 7 days, create duration with week granularity
+		return fmt.Sprintf("%dw", int(d.Seconds()/604800))
+	}
+	// keep minimum to 1 week.
+	// TODO: remove hack.
+	//return fmt.Sprintf("%dd", int(d.Hours()/24))
+	return "1w"
 }

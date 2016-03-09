@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/influxdata/influxdb/client/v2"
 )
 
 type WspToInf struct {
@@ -101,7 +103,7 @@ func (stub *WspToInfStub) convert(gp *GraphitePoint) InfluxPoint {
 
 	return *NewInfluxPoint(
 		stub.Measurement,
-		gp.Retention.String(),
+		toInfluxDbDuration(gp.Retention),
 		stub.Tags,
 		inField,
 		gp.Time)
@@ -138,6 +140,15 @@ func (p InfluxPoint) Line() []byte {
 	byt := buf.Bytes()
 
 	return byt
+}
+
+func (p InfluxPoint) Point() *client.Point {
+	point, _ := client.NewPoint(
+		p.Measurement,
+		p.Tags.toMap(),
+		p.Field.toMap(),
+		time.Unix(p.TimeStamp, 0))
+	return point
 }
 
 type GraphitePoint struct {

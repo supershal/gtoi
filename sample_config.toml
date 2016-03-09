@@ -1,3 +1,14 @@
+[migration]
+	debug = true
+	interactive = true
+	maxConcurrentFiles = 10
+	host = "influxdb-k8s.e2e.apigee.net:8086"
+	database = "traffic"
+	migrateRetentionPolicies = true
+
+
+
+
 [[pointconverters.whisper]]
 	pointRegex = "servers.(?P<host>[^/.]*).+_(?P<measurement>[^/.]*).+(?P<field>[^/.]*)"
 	measurement = "?measurement"
@@ -12,9 +23,10 @@
 
 [influxclient]
       enabled = true
-      addresses = ["localhost:8086","localhost:1234","localhost:5678"]
+      address = "localhost:8086"
       database = "traffic"
       precision = "s"
       batch_size = 10000
       batch_interval = "0s"
       concurrency = 10
+

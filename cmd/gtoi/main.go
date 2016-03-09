@@ -40,9 +40,20 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	cfg.Migration.SetLogger()
+	if err := cfg.Migration.CreateDBIfNotExists(); err != nil {
+		return err
+	}
+
+	var rps []string
+	if rps, err = cfg.Migration.CreateRP(whisperDir); err != nil {
+		return err
+	}
+
 	//fmt.Printf("config = %+v\n", cfg.PointConverters.WspToInfConvs[0])
 	t1 := time.Now()
-	gtoi.Migrate(cfg, whisperDir)
+	client := gtoi.NewInfluxClient(cfg.InfluxClientConfig, rps...)
+	cfg.Migration.Migrate(cfg.PointConverters, client, whisperDir)
 	fmt.Println("Migration duration", time.Now().Sub(t1))
 
 	return nil

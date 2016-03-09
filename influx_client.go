@@ -1,43 +1,117 @@
 package gtoi
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
-	"io"
-	"io/ioutil"
-	"net/http"
+	"log"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/influxdata/influxdb/client/v2"
 )
 
-const backoffInterval = time.Duration(500 * time.Millisecond)
+type InfluxClientConfig struct {
+	Enabled       bool   `toml:"enabled"`
+	Host          string `toml:"host"`
+	Database      string `toml:"database"`
+	Precision     string `toml:"precision"`
+	BatchSize     int    `toml:"batch_size"`
+	BatchInterval string `toml:"batch_interval"`
+	Concurrency   int    `toml:"concurrency"`
+	PreserveRP    bool   `toml:"preserveRP"`
+}
+
+type RPBatch struct {
+	name   string
+	batch  client.BatchPoints
+	logger *log.Logger
+}
+
+func NewRPBatch(rpName string, config *InfluxClientConfig) RPBatch {
+
+	b, _ := client.NewBatchPoints(client.BatchPointsConfig{
+		Database:         config.Database,
+		Precision:        config.Precision,
+		RetentionPolicy:  rpName,
+		WriteConsistency: "1", // TODO: configurable.
+	})
+	return RPBatch{
+		name:   rpName,
+		batch:  b,
+		logger: log.New(os.Stderr, "["+rpName+"-writer]", log.LstdFlags),
+	}
+}
+
+func (rp *RPBatch) addPoint(p *client.Point) {
+	rp.batch.AddPoint(p)
+}
+
+func (rp *RPBatch) write(address string) (Response, error) {
+	if len(rp.batch.Points()) == 0 {
+		return Response{}, nil
+	}
+	c, err := client.NewHTTPClient(client.HTTPConfig{
+		Addr: fmt.Sprintf("http://%v", address),
+	})
+	if err != nil {
+		return Response{}, err
+	}
+	defer c.Close()
+
+	t1 := time.Now()
+	err = c.Write(rp.batch)
+	if err != nil {
+		rp.logger.Println("error writing", err)
+		return Response{}, err
+	}
+	lat := time.Now().Sub(t1)
+	resp := Response{
+		Database:   rp.batch.Database(),
+		RP:         rp.batch.RetentionPolicy(),
+		Pointcount: len(rp.batch.Points()),
+		Duration:   lat,
+	}
+
+	rp.logger.Printf("%+v", resp)
+	return resp, nil
+}
 
 type InfluxClient struct {
-	Enabled       bool     `toml:"enabled"`
-	Addresses     []string `toml:"addresses"`
-	Database      string   `toml:"database"`
-	Precision     string   `toml:"precision"`
-	BatchSize     int      `toml:"batch_size"`
-	BatchInterval string   `toml:"batch_interval"`
-	Concurrency   int      `toml:"concurrency"`
-
-	r        chan<- response
+	config   *InfluxClientConfig
 	interval time.Duration
+	batches  map[string]RPBatch
+}
+
+func NewInfluxClient(c *InfluxClientConfig, policies ...string) *InfluxClient {
+	bs := make(map[string]RPBatch)
+	for _, rp := range policies {
+		bs[rp] = NewRPBatch(rp, c)
+	}
+	return &InfluxClient{
+		config:  c,
+		batches: bs,
+	}
+}
+
+func (c *InfluxClient) addPoint(p InfluxPoint) {
+	rp := p.RP
+	rpBatch := c.batches["default"]
+	if nonDefault, ok := c.batches[rp]; ok {
+		rpBatch = nonDefault
+	}
+	rpBatch.addPoint(p.Point())
 }
 
 // Batch groups together points
-func (c *InfluxClient) Send(ps <-chan InfluxPoint, r chan<- response) error {
-	if !c.Enabled {
+func (c *InfluxClient) Send(ps <-chan InfluxPoint, r chan<- Response, e chan<- error) error {
+	if !c.config.Enabled {
 		return nil
 	}
 
-	c.r = r
-	var buf bytes.Buffer
 	var wg sync.WaitGroup
-	counter := NewConcurrencyLimiter(c.Concurrency)
+	counter := NewConcurrencyLimiter(c.config.Concurrency)
 
-	interval, err := time.ParseDuration(c.BatchInterval)
+	interval, err := time.ParseDuration(c.config.BatchInterval)
 	if err != nil {
 		return err
 	}
@@ -46,110 +120,53 @@ func (c *InfluxClient) Send(ps <-chan InfluxPoint, r chan<- response) error {
 	ctr := 0
 
 	for p := range ps {
-		b := p.Line()
 		ctr++
+		c.addPoint(p)
 
-		buf.Write(b)
-		buf.Write([]byte("\n"))
-
-		if ctr%c.BatchSize == 0 && ctr != 0 {
-			b := buf.Bytes()
-
-			// Trimming the trailing newline character
-			b = b[0 : len(b)-1]
-
+		if ctr%c.config.BatchSize == 0 && ctr != 0 {
 			wg.Add(1)
 			counter.Increment()
-			go func(byt []byte) {
-				fmt.Println("Sending ", c.BatchSize, " Lines and Size ", len(byt), "bytes")
-				c.fakeSendWithRetry(byt, time.Duration(1))
+			go func(batches map[string]RPBatch) {
+				defer wg.Done()
+				for _, b := range batches {
+					resp, err := b.write(c.config.Host)
+					if err != nil {
+						e <- err
+					} else {
+						r <- resp
+					}
+				}
 				counter.Decrement()
-				wg.Done()
-			}(b)
-
-			var temp bytes.Buffer
-			buf = temp
+			}(c.batches)
+			c.flushBatches()
 		}
 	}
 	// send remaining
-	/////////////////////////////
-
-	b := buf.Bytes()
-
-	// Trimming the trailing newline character
-	b = b[0 : len(b)-1]
-
 	wg.Add(1)
 	counter.Increment()
-	go func(byt []byte) {
-		fmt.Println("Sending ", ctr%c.BatchSize, " Lines and Size ", len(byt), "bytes")
-		c.fakeSendWithRetry(byt, time.Duration(1))
+	go func(batches map[string]RPBatch) {
+		defer wg.Done()
+		for _, b := range batches {
+			resp, err := b.write(c.config.Host)
+			if err != nil {
+				e <- err
+			} else {
+				r <- resp
+			}
+		}
 		counter.Decrement()
-		wg.Done()
-	}(b)
-
-	////////////////////////////
-
+	}(c.batches)
+	c.flushBatches()
 	wg.Wait()
 
 	return nil
 }
 
-func (c *InfluxClient) fakeSendWithRetry(b []byte, backoff time.Duration) {
-	d, _ := time.ParseDuration("1s")
-	time.Sleep(d)
-	rs := response{}
-	c.r <- rs
-}
-
-// post sends a post request with a payload of points
-func post(url string, datatype string, data io.Reader) (*http.Response, error) {
-	resp, err := http.Post(url, datatype, data)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+func (c *InfluxClient) flushBatches() {
+	newBatchs := make(map[string]RPBatch)
+	for rp, _ := range c.batches {
+		newBatchs[rp] = NewRPBatch(rp, c.config)
 	}
 
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		err := errors.New(string(body))
-		return nil, err
-	}
-
-	return resp, nil
-}
-
-// Send calls post and returns a response
-func (c *InfluxClient) sendRequest(b []byte) (response, error) {
-
-	t := time.Now()
-	// TODO: fix c.Addresses to choose random interger from len(addresses)
-	resp, err := post(c.Addresses[0], "application/x-www-form-urlencoded", bytes.NewBuffer(b))
-	resDur := time.Now().Sub(t)
-	if err != nil {
-		return response{Duration: resDur}, err
-	}
-
-	r := response{
-		Resp:     resp,
-		Duration: resDur,
-	}
-
-	return r, nil
-}
-
-func (c *InfluxClient) sendWithRetry(b []byte, backoff time.Duration) {
-	bo := backoff + backoffInterval
-	rs, err := c.sendRequest(b)
-	time.Sleep(c.interval)
-
-	c.r <- rs
-	if !rs.Success() || err != nil {
-		time.Sleep(bo)
-		c.sendWithRetry(b, bo)
-	}
+	c.batches = newBatchs
 }
